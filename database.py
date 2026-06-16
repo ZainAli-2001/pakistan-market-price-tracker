@@ -142,64 +142,7 @@ def get_client():
 # Insert new products; skip any URL that already exists.
 # Returns a dict of url → product_id for the price insert step.
 # -----------------------------------------------------------
-def upsert_products(client, items: list) -> dict:
-    seen_urls = set()
-    product_rows = []
-
-    for item in items:
-        url = item.get("url", "")
-        if url and url not in seen_urls:
-            seen_urls.add(url)
-            product_rows.append({
-                "name":     item["name"],
-                "url":      url,
-                "category": item["category"],
-                "keyword":  item["keyword"],
-                "source":   item.get("source", "unknown"),
-            })
-
-    if not product_rows:
-        return {}
-
-    # Upsert in chunks of 100 to avoid request size limits
-    chunk_size = 100
-    for i in range(0, len(product_rows), chunk_size):
-        chunk = product_rows[i : i + chunk_size]
-        client.table("products").upsert(
-            chunk,
-            on_conflict="url",
-            ignore_duplicates=True
-        ).execute()
-
-    # Fetch IDs in chunks of 100 — fixes "URL query too long" error
-    url_to_id = {}
-    urls = [r["url"] for r in product_rows]
-
-    for i in range(0, len(urls), chunk_size):
-        chunk_urls = urls[i : i + chunk_size]
-        response = (
-            client.table("products")
-            .select("id, url")
-            .in_("url", chunk_urls)
-            .execute()
-        )
-        for row in response.data:
-            url_to_id[row["url"]] = row["id"]
-
-    log.info("  Mapped %d product URLs to IDs", len(url_to_id))
-    return url_to_id
-
-
-# -----------------------------------------------------------
-# INSERT PRICES
-# Every scrape run inserts fresh rows — this IS the time series.
-# Batched in chunks of 500 to stay within Supabase limits.
-# -----------------------------------------------------------
 def insert_prices(client, items: list, url_to_id: dict):
-    """
-    Insert one price observation per item per scrape run.
-    Carries all 3 layers of data from the scraper output.
-    """
     price_rows = []
 
     for item in items:
@@ -207,26 +150,29 @@ def insert_prices(client, items: list, url_to_id: dict):
         if not product_id:
             continue
 
+        # Sanitize — convert empty strings to None
+        # Supabase integer columns reject "" but accept NULL
+        def clean(val):
+            if val == "" or val == "":
+                return None
+            return val
+
         price_rows.append({
-            "product_id": product_id,
+            "product_id":     product_id,
 
-            # Layer 1
-            "original_price": item.get("original_price"),
-            "sale_price":     item.get("sale_price"),
-            "final_price":    item.get("final_price"),
+            "original_price": clean(item.get("original_price")),
+            "sale_price":     clean(item.get("sale_price")),
+            "final_price":    clean(item.get("final_price")),
 
-            # Layer 2
-            "unit_value": item.get("unit_value"),
-            "unit_type":  item.get("unit_type"),
-            "unit_price": item.get("unit_price"),
+            "unit_value":     clean(item.get("unit_value")),
+            "unit_type":      clean(item.get("unit_type")),
+            "unit_price":     clean(item.get("unit_price")),
 
-            # quality signals
-            "rating":       item.get("rating"),
-            "review_count": item.get("review_count"),
+            "rating":         clean(item.get("rating")),
+            "review_count":   clean(item.get("review_count")),
 
-            # Layer 3 time series
-            "run_id":     item.get("run_id"),
-            "scraped_at": item.get("scraped_at", datetime.now().isoformat()),
+            "run_id":         item.get("run_id"),
+            "scraped_at":     item.get("scraped_at", datetime.now().isoformat()),
         })
 
     if not price_rows:
@@ -238,7 +184,6 @@ def insert_prices(client, items: list, url_to_id: dict):
         chunk = price_rows[i : i + chunk_size]
         client.table("product_prices").insert(chunk).execute()
         log.info("  Inserted %d price rows", len(chunk))
-
 
 # -----------------------------------------------------------
 # MAIN SAVE FUNCTION
