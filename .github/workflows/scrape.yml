@@ -1,0 +1,49 @@
+# =============================================================
+#  GitHub Actions — Pakistan Price Tracker
+# =============================================================
+# Runs main.py on GitHub's servers twice daily (6 AM + 6 PM PKT)
+# with no laptop, no server, no cost for public repos.
+#
+# SETUP CHECKLIST:
+#   [ ] Push repo to GitHub
+#   [ ] Settings → Secrets → Actions → New secret:
+#         SUPABASE_URL  = https://xxxx.supabase.co
+#         SUPABASE_KEY  = service_role key
+#   [ ] Actions tab → enable workflows if prompted
+#   [ ] Trigger first run manually to verify everything works
+# =============================================================
+
+name: Scrape Pakistan Prices
+
+on:
+  schedule:
+    - cron: "0 1 * * *"     # 6:00 AM PKT  (UTC+5 → 01:00 UTC)
+    - cron: "0 13 * * *"    # 6:00 PM PKT  (UTC+5 → 13:00 UTC)
+  workflow_dispatch:         # manual trigger from Actions tab
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python main.py
+
+      - name: Report on failure
+        if: failure()
+        run: echo "Scraper failed — check logs above."

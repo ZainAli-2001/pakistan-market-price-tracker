@@ -1,0 +1,248 @@
+"""
+Category-specific exclusion rules for filtering products that match a
+search keyword but are not the target forecasting commodity (e.g.
+hair oil, instant tea, milk powder). Used after title normalization
+to improve dataset quality before analysis.
+"""
+
+import re
+
+# Regex-based exclusions, for patterns plain substring matching can't express
+# safely (e.g. "T/B" — the tea-bag abbreviation — where a bare substring
+# match on "t/b" risks false positives without word boundaries).
+REGEX_EXCLUSION_PATTERNS = {
+    "tea": [
+        re.compile(r"\bT\s*/\s*B\b", re.IGNORECASE),  # e.g. "TAPAL DANEDAR ROUND TEA T/B 200 GM"
+    ],
+}
+
+EXCLUSION_KEYWORDS = {
+    "oil": [
+        "hair oil",
+        "massage oil",
+        "essential oil",
+        "body oil",
+        "baby oil",
+        "argan",
+        "castor",
+        "jojoba",
+        "pumpkin seed",
+        "rosemary",
+        "anti lice",
+        "fofo",
+        "reetha",
+        "shikakai",
+        "amla",
+        "onion oil",
+        "nagarmotha",
+        "spray",
+        "mites",
+        "alkanet",
+        "ratanjot",
+        "sabja",
+        "tukhmalanga",
+        "kalonji",
+        "malkangni",
+        "egg oil",
+        "rogan",
+        "roghan",
+    ],
+    "tea": [
+        "tea bag",
+        "tea bags",
+        "instant tea",
+        "3 in 1",
+        "3in1",
+        "2 in 1",
+        "2in1",
+        "premix",
+        "pre mix",
+        "latte",
+        "cappuccino",
+        "coffee",
+        "joshanda",
+    ],
+    "dairy": [
+        "milk powder",
+        "powder milk",
+        "flavoured milk",
+        "flavored milk",
+        "chocolate milk",
+        "strawberry milk",
+        "banana milk",
+        "kitten milk",
+        "cat milk",
+        "coffee creamer",
+        "tea whitener",
+        "cadbury dairy milk",
+        "dairy milk bar",
+        "infant formula",
+        "follow-up formula",
+        "maternal formula",
+        "toddler milk",
+        "weight gain powder",
+        "lactogen",
+        "pediasure",
+        "mamalac",
+        "rusk",
+        "baby cereal",
+        "ovaltine",
+        "malt drink",
+        "soya milk",
+        "soy milk",
+        "soya drink",
+        "cleansing milk",
+        "feeding bottle",
+        "porridge",
+        "horlicks",
+        "nesquik",
+        "nesquick",
+        "chocomalt",
+        "pedialac",
+        "dog food",
+        "pedigree",
+        "milk replacer",
+        "puppies",
+        "semolina",
+        "couscous",
+        "biscuit",
+        "pakola juice",
+        "pakola yum milk",
+        "lipton",
+        "milka",
+        "complan",
+        "milo",
+        "cocoa malt",
+        "lactoogen",
+        "lactometer",
+        "oleanolic acid",
+        "lactogrow",
+        "lactol",
+        "azolac",
+        "olivola",
+        "oat milk",
+        "coconut milk drink",
+        "flavour milk",
+        "olives",
+        "face wash",
+    ],
+    "ghee": [
+        "body butter",
+        "lobia",
+        "kala chana",
+        "flaxseed",
+        "soyabean",
+    ],
+    "sugar": [
+        "sweetener",
+        "sweetner",
+        "stevia",
+        "erythritol",
+        "monk fruit",
+        "xylitol",
+        "keto",
+        "neutraved",
+        "gugal",
+        "sun dried tomato",
+        "alum",
+        "molasses",
+    ],
+    "flour": [
+        "cake mix",
+        "pancake mix",
+        "corn flour",
+        "cornflour",
+        "custard powder",
+        "keto flour",
+        "keto",
+        "almond flour",
+        "coconut flour",
+        "diet",
+        "diabetic",
+        "diabetes",
+        "weight loss",
+        "gluten free",
+        "sugar watchers",
+        "sugar free",
+        "sugar control",
+        "low gi",
+        "buckwheat",
+        "soya flour",
+        "soyabean",
+        "ragi",
+        "rice flour",
+        "rice powder",
+        "rice atta",
+        "cereal",
+        "rolled wheat",
+        "rolled barley",
+        "tapioca flour",
+        "sagudana",
+        "sabudana",
+        "amaranth",
+        "rajgira",
+        "jowar",
+        "jawar",
+        "sorghum",
+        "oat flour",
+        "oats flour",
+        "bajra atta",
+        "bajra flour",
+        "pearl millet",
+        "millet flour",
+        "emmer",
+        "chana flour",
+        "chickpea flour",
+        "bran",
+        "flaxseed flour",
+        "tempura flour",
+        "halwa",
+        "sattu",
+        "falahari",
+        "falhari",
+        "farali",
+        "self rising",
+        "self-rising",
+        "self raising",
+        "self-raising",
+    ],
+    "rice": [
+        "rice flour",
+        "rice paper",
+        "rice noodles",
+    ],
+    "pulses": [
+        "flour",
+        "besan",
+        "wrinkles",
+        "acne",
+        "pegion",
+        "murga",
+    ],
+}
+
+
+def get_commodity_filter_reason(name: str, category: str):
+    """
+    Returns the exclusion keyword responsible for rejection.
+    Returns None when the product is valid.
+    """
+    title = name.lower()
+
+    for keyword in EXCLUSION_KEYWORDS.get(category, []):
+        if keyword in title:
+            return keyword
+
+    for pattern in REGEX_EXCLUSION_PATTERNS.get(category, []):
+        if pattern.search(name):
+            return pattern.pattern
+
+    return None
+
+
+def is_valid_commodity(name: str, category: str) -> bool:
+    """
+    Returns False when the product belongs to a known non-commodity
+    variant.
+    """
+    return get_commodity_filter_reason(name, category) is None

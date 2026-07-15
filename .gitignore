@@ -1,0 +1,8 @@
+# Python cache
+__pycache__/
+
+# Virtual environment
+myenv/
+
+# Test files/folders
+test_case/
