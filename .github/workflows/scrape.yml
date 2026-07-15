@@ -20,30 +20,35 @@ on:
     - cron: "0 1 * * *"     # 6:00 AM PKT  (UTC+5 → 01:00 UTC)
     - cron: "0 13 * * *"    # 6:00 PM PKT  (UTC+5 → 13:00 UTC)
   workflow_dispatch:         # manual trigger from Actions tab
-
+    inputs:
+      dry_run:
+        description: "Dry run (skip Supabase write)"
+        required: false
+        default: false
+        type: boolean
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python main.py
-
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            python main.py --dry-run
+          else
+            python main.py
+          fi
       - name: Report on failure
         if: failure()
         run: echo "Scraper failed — check logs above."
