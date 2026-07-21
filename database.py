@@ -80,7 +80,7 @@ create table if not exists product_prices (
 
     -- Layer 2: normalised unit price
     unit_value     numeric,                 -- extracted weight/volume number
-    unit_type      text,                    -- 'kg' | 'liter'
+    unit_type      text,                    -- 'kg' | 'liter' | 'unit'
     unit_price     numeric,                 -- final_price / unit_value
 
     -- quality signals
@@ -92,7 +92,7 @@ create table if not exists product_prices (
     run_id         text not null,
 
     -- version info
-    pipeline_version text
+    pipeline_version text, 
 );
 
 -- 3. Scrape execution statistics
@@ -130,25 +130,8 @@ create table if not exists scrape_rejections (
     product_name   text,
     product_url    text,
 
-    -- populated for outlier_unit_price rejections only
-    unit_value       numeric,
-    unit_type        text,
-    unit_price       numeric,
-    threshold_used   numeric,
-    threshold_type   text,          -- 'dynamic_median' | 'dynamic_median_low' | 'fallback_limit'
-    pipeline_version text,
-
     rejected_at    timestamp default now()
 );
-
--- for existing deployments created before the columns above existed
-alter table scrape_rejections
-    add column if not exists unit_value       numeric,
-    add column if not exists unit_type        text,
-    add column if not exists unit_price       numeric,
-    add column if not exists threshold_used   numeric,
-    add column if not exists threshold_type   text,
-    add column if not exists pipeline_version text;
 
 -- 5. Indexes (critical for forecasting queries)
 create index if not exists idx_prices_product_time
@@ -223,28 +206,58 @@ def upsert_products(client, items: list) -> dict:
 
     # Upsert in chunks of 100 to avoid request size limits
     chunk_size = 100
+    upsert_failures = 0
     for i in range(0, len(product_rows), chunk_size):
         chunk = product_rows[i : i + chunk_size]
-        client.table("products").upsert(
-            chunk,
-            on_conflict="url",
-            ignore_duplicates=True
-        ).execute()
+        try:
+            client.table("products").upsert(
+                chunk,
+                on_conflict="url",
+                ignore_duplicates=True
+            ).execute()
+        except Exception as e:
+            upsert_failures += 1
+            log.error(
+                "  Upsert failed for chunk %d-%d (%d products): %s",
+                i, i + len(chunk), len(chunk), e
+            )
+            # Don't re-raise — a failed chunk here shouldn't stop the
+            # remaining chunks. Any URL in this chunk will simply come back
+            # with no id from the re-fetch below, and get counted there.
 
     # Fetch IDs in chunks of 100 — fixes "URL query too long" error
     url_to_id = {}
     urls = [r["url"] for r in product_rows]
+    select_failures = 0
 
     for i in range(0, len(urls), chunk_size):
         chunk_urls = urls[i : i + chunk_size]
-        response = (
-            client.table("products")
-            .select("id, url")
-            .in_("url", chunk_urls)
-            .execute()
-        )
+        try:
+            response = (
+                client.table("products")
+                .select("id, url")
+                .in_("url", chunk_urls)
+                .execute()
+            )
+        except Exception as e:
+            select_failures += 1
+            log.error(
+                "  ID re-fetch failed for chunk %d-%d (%d urls): %s",
+                i, i + len(chunk_urls), len(chunk_urls), e
+            )
+            continue
+
         for row in response.data:
             url_to_id[row["url"]] = row["id"]
+
+    unmapped = [u for u in urls if u not in url_to_id]
+    if unmapped:
+        log.warning(
+            "  %d of %d product URLs did not map to an id (upsert_failures=%d, select_failures=%d) — "
+            "these items will be skipped by insert_prices(). Sample: %s",
+            len(unmapped), len(urls), upsert_failures, select_failures,
+            unmapped[:5]
+        )
 
     log.info("  Mapped %d product URLs to IDs", len(url_to_id))
     return url_to_id
@@ -257,10 +270,12 @@ def upsert_products(client, items: list) -> dict:
 # -----------------------------------------------------------
 def insert_prices(client, items: list, url_to_id: dict):
     price_rows = []
+    skipped_no_product_id = 0
 
     for item in items:
         product_id = url_to_id.get(item.get("url", ""))
         if not product_id:
+            skipped_no_product_id += 1
             continue
 
         # Sanitize — convert empty strings to None
@@ -290,15 +305,41 @@ def insert_prices(client, items: list, url_to_id: dict):
             
         })
 
+    if skipped_no_product_id:
+        log.warning(
+            "  %d items skipped — no product_id mapping found (see upsert_products() log above for why)",
+            skipped_no_product_id
+        )
+
     if not price_rows:
         log.warning("No price rows to insert.")
         return
 
     chunk_size = 500
+    inserted = 0
+    insert_failures = 0
     for i in range(0, len(price_rows), chunk_size):
         chunk = price_rows[i : i + chunk_size]
-        client.table("product_prices").insert(chunk).execute()
+        try:
+            client.table("product_prices").insert(chunk).execute()
+        except Exception as e:
+            insert_failures += 1
+            log.error(
+                "  Insert failed for chunk %d-%d (%d rows): %s",
+                i, i + len(chunk), len(chunk), e
+            )
+            # Don't re-raise — let remaining chunks still attempt to insert
+            # rather than losing every row after the first bad chunk.
+            continue
+
+        inserted += len(chunk)
         log.info("  Inserted %d price rows", len(chunk))
+
+    if insert_failures:
+        log.warning(
+            "  %d of %d price rows failed to insert across %d failed chunk(s)",
+            len(price_rows) - inserted, len(price_rows), insert_failures
+        )
 
 
 def save_scrape_run(client, stats: dict, scraper_name: str, run_id: str):
@@ -394,20 +435,26 @@ def save_all(items: list, results: list):
 #   ds = scraped_at (datetime)
 #   y  = unit_price (the forecasting target)
 # -----------------------------------------------------------
-def get_price_history(category: str, source: str = None, unit_type: str = None, pipeline_version: str = None):
+def get_price_history(category: str, source: str = None, unit_type: str = None, pipeline_version: str = None, page_size: int = 1000):
     """
     Fetch time-series price history for a category from Supabase.
     Returns a pandas DataFrame sorted by scraped_at.
 
     Args:
         category:         e.g. "flour", "oil", "sugar"
-        source:            "daraz" | "naheed" | None (both)
-        unit_type:         "kg" | "liter" | None (no filter — each category
+        source:           "daraz" | "naheed" | None (both)
+        unit_type:        "kg" | "liter" | None (no filter — each category
                            already normalizes to one standard unit; forcing
                            "kg" as a default silently emptied liter-based
                            categories like oil/ghee/dairy)
         pipeline_version: filter to rows from one pipeline version, or
                            None (all versions)
+        page_size:        rows per request when paginating (default 1000,
+                           matching Supabase/PostgREST's typical cap — raise
+                           it only if your project's max-rows setting has
+                           been raised to match, otherwise a page_size above
+                           the server's real cap silently gets truncated
+                           back down to that cap per request anyway)
 
     Returns:
         DataFrame with: name, source, unit_price, unit_type, scraped_at
@@ -436,7 +483,6 @@ def get_price_history(category: str, source: str = None, unit_type: str = None, 
 
     # Supabase/PostgREST caps a single request (commonly 1000 rows) unless
     # paginated — page through with .range() until a page comes back short.
-    page_size = 1000
     data = []
     start = 0
     while True:
@@ -477,7 +523,7 @@ def get_price_history(category: str, source: str = None, unit_type: str = None, 
     prices = df["unit_price"].dropna()
     reference_median = prices.median() if len(prices) >= MIN_SAMPLE_FOR_MEDIAN else None
     df = df[df["unit_price"].apply(
-        lambda p: validate_unit_price(p, category, reference_median=reference_median)[0] is not None
+        lambda p: validate_unit_price(p, category, reference_median=reference_median) is not None
     )]
 
     if df.empty:
